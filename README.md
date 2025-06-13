@@ -1,6 +1,6 @@
 # SteeringGAN
 
-SteeringGAN is a framework for training and evaluating activation-steered generative adversarial networks (GANs). This project enables directional control over the output behavior of GANs using concept activation vectors.
+
 
 ---
 
@@ -11,7 +11,7 @@ Follow the steps below to set up your development environment.
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/fastscience-ai/steering_gan
+git clone https://github.com/fastscience-ai/SteeringGAN.git
 cd steering_gan
 ```
 
