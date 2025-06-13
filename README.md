@@ -30,6 +30,7 @@ conda activate SteeringGAN
 pip install -r requirements.txt
 ```
 
-### [Tutorial Notebook in Colab](https://colab.research.google.com/drive/1Wwa86Beal6uBnkZwBAU0eSwaYxAg_gw2?usp=sharing)
+### [Tutorial Notebook in Colab_Repeng](https://colab.research.google.com/drive/1Wwa86Beal6uBnkZwBAU0eSwaYxAg_gw2?usp=sharing)
+Referred [repeng repo](https://github.com/vgel/repeng)
 
 
