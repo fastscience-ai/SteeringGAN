@@ -67,7 +67,7 @@ class ControlVector:
         dataset: list[DatasetEntry],
         *,
         decode: bool = True,
-        method: typing.Literal["umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"] = "pca_center",
+        method: typing.Literal["scav", "umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"] = "pca_center",
         **kwargs,
     ) -> "ControlVector":
         """
@@ -239,6 +239,98 @@ class ControlVector:
     def __truediv__(self, other: int | float | np.number) -> "ControlVector":
         return self.__mul__(1 / other)
 
+#"""
+#def read_representations(
+#    model: "PreTrainedModel | ControlModel",
+#    tokenizer: PreTrainedTokenizerBase,
+#    inputs: list[DatasetEntry],
+#    hidden_layers: typing.Iterable[int] | None = None,
+#    batch_size: int = 32,
+#    method: typing.Literal["umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"] = "pca_contrastvector",
+#    transform_hiddens: (
+#        typing.Callable[[dict[int, np.ndarray]], dict[int, np.ndarray]] | None
+#    ) = None,
+#) -> dict[int, np.ndarray]:
+#    if not hidden_layers:
+#        hidden_layers = range(-1, -model.config.num_hidden_layers, -1)
+#
+#    # normalize the layer indexes if they're negative
+#    n_layers = len(model_layer_list(model))
+#    hidden_layers = [i if i >= 0 else n_layers + i for i in hidden_layers]
+#
+#    # the order is [positive, negative, positive, negative, ...]
+#    train_strs = [s for ex in inputs for s in (ex.positive, ex.negative)]
+#
+#    layer_hiddens = batched_get_hiddens(
+#        model, tokenizer, train_strs, hidden_layers, batch_size
+#    )
+#
+#    if transform_hiddens is not None:
+#        layer_hiddens = transform_hiddens(layer_hiddens)
+
+#    # get directions for each layer using PCA
+#    directions: dict[int, np.ndarray] = {}
+#    for layer in tqdm.tqdm(hidden_layers):
+#        h = layer_hiddens[layer]
+#        assert h.shape[0] == len(inputs) * 2
+#        # ["umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"]
+#        if method == "pca_contrastvector":
+#            train = h[::2] - h[1::2] # PCAContrastVector
+#        elif method == "pca_readingvector":
+#            train = h[::2] #only positive representation
+#        elif method == "reading_contrastvector":
+#            train = h[::2] - h[1::2]
+#        elif method == "readingvector":
+#            train = h[::2]
+#        elif method == "pca_center":
+#            center = (h[::2] + h[1::2]) / 2
+#            train = h
+#            train[::2] -= center
+#            train[1::2] -= center
+#        elif method == "umap":
+#            train = h
+#        else:
+#            raise ValueError("unknown method " + method)
+#
+#        if method not in ["umap", "readingvector", "reading_contrastvector"]:
+#            # shape (1, n_features)
+#            pca_model = PCA(n_components=1, whiten=False).fit(train)
+#            # shape (n_features,)
+#            directions[layer] = pca_model.components_.astype(np.float32).squeeze(axis=0)
+#        elif method == "umap":
+#            # still experimental so don't want to add this as a real dependency yet
+#            import umap  # type: ignore
+#
+#            umap_model = umap.UMAP(n_components=1)
+#            embedding = umap_model.fit_transform(train).astype(np.float32)
+#            directions[layer] = np.sum(train * embedding, axis=0) / np.sum(embedding)
+#        else:
+#            directions[layer] = np.mean(train, axis = 0)
+#
+#        # calculate sign
+#        projected_hiddens = project_onto_direction(h, directions[layer])
+#
+#        # order is [positive, negative, positive, negative, ...]
+#        positive_smaller_mean = np.mean(
+#            [
+#                projected_hiddens[i] < projected_hiddens[i + 1]
+#                for i in range(0, len(inputs) * 2, 2)
+#            ]
+#        )
+#        positive_larger_mean = np.mean(
+#            [
+#                projected_hiddens[i] > projected_hiddens[i + 1]
+#                for i in range(0, len(inputs) * 2, 2)
+#            ]
+#        )
+#
+#        if positive_smaller_mean > positive_larger_mean:  # type: ignore
+#            directions[layer] *= -1
+#
+#    return directions
+    
+
+from sklearn.linear_model import LogisticRegression
 
 def read_representations(
     model: "PreTrainedModel | ControlModel",
@@ -246,22 +338,23 @@ def read_representations(
     inputs: list[DatasetEntry],
     hidden_layers: typing.Iterable[int] | None = None,
     batch_size: int = 32,
-    method: typing.Literal["umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"] = "pca_contrastvector",
+    method: typing.Literal[
+        "umap", "readingvector", "reading_contrastvector",
+        "pca_contrastvector", "pca_readingvector", "pca_center", "scav"
+    ] = "pca_contrastvector",
     transform_hiddens: (
         typing.Callable[[dict[int, np.ndarray]], dict[int, np.ndarray]] | None
     ) = None,
-) -> dict[int, np.ndarray]:
+) -> dict[int, typing.Any]:  # Returns either directions or classifiers
     """
-    Extract the representations based on the contrast dataset.
+    Extract either steering directions or classifiers, depending on the method.
     """
     if not hidden_layers:
         hidden_layers = range(-1, -model.config.num_hidden_layers, -1)
 
-    # normalize the layer indexes if they're negative
     n_layers = len(model_layer_list(model))
     hidden_layers = [i if i >= 0 else n_layers + i for i in hidden_layers]
 
-    # the order is [positive, negative, positive, negative, ...]
     train_strs = [s for ex in inputs for s in (ex.positive, ex.negative)]
 
     layer_hiddens = batched_get_hiddens(
@@ -271,16 +364,25 @@ def read_representations(
     if transform_hiddens is not None:
         layer_hiddens = transform_hiddens(layer_hiddens)
 
-    # get directions for each layer using PCA
-    directions: dict[int, np.ndarray] = {}
+    results: dict[int, typing.Any] = {}
     for layer in tqdm.tqdm(hidden_layers):
         h = layer_hiddens[layer]
         assert h.shape[0] == len(inputs) * 2
-        # ["umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"]
+
+        if method == "scav": #SOO scav method-> return list of classifier models
+            pos_train_embds, neg_train_embds = h[::2], h[1::2]
+            x = np.concatenate([pos_train_embds, neg_train_embds], axis=0)
+            y = np.concatenate([np.ones(len(pos_train_embds)), np.zeros(len(neg_train_embds))], axis=0)
+            clf = LogisticRegression(penalty="none", solver="lbfgs", max_iter=1000)
+            clf.fit(x, y)
+            results[layer] = clf
+            continue  # skip rest of the loop
+
+        # other methods → compute direction vectors
         if method == "pca_contrastvector":
-            train = h[::2] - h[1::2] # PCAContrastVector
+            train = h[::2] - h[1::2]
         elif method == "pca_readingvector":
-            train = h[::2] #only positive representation
+            train = h[::2]
         elif method == "reading_contrastvector":
             train = h[::2] - h[1::2]
         elif method == "readingvector":
@@ -295,42 +397,36 @@ def read_representations(
         else:
             raise ValueError("unknown method " + method)
 
+        # compute direction from embeddings
         if method not in ["umap", "readingvector", "reading_contrastvector"]:
-            # shape (1, n_features)
             pca_model = PCA(n_components=1, whiten=False).fit(train)
-            # shape (n_features,)
-            directions[layer] = pca_model.components_.astype(np.float32).squeeze(axis=0)
+            direction = pca_model.components_.astype(np.float32).squeeze(axis=0)
         elif method == "umap":
-            # still experimental so don't want to add this as a real dependency yet
             import umap  # type: ignore
-
             umap_model = umap.UMAP(n_components=1)
             embedding = umap_model.fit_transform(train).astype(np.float32)
-            directions[layer] = np.sum(train * embedding, axis=0) / np.sum(embedding)
+            direction = np.sum(train * embedding, axis=0) / np.sum(embedding)
         else:
-            directions[layer] = np.mean(train, axis = 0)
+            direction = np.mean(train, axis=0)
 
-        # calculate sign
-        projected_hiddens = project_onto_direction(h, directions[layer])
+        # align direction so positive > negative
+        projected_hiddens = project_onto_direction(h, direction)
+        positive_smaller_mean = np.mean([
+            projected_hiddens[i] < projected_hiddens[i + 1]
+            for i in range(0, len(inputs) * 2, 2)
+        ])
+        positive_larger_mean = np.mean([
+            projected_hiddens[i] > projected_hiddens[i + 1]
+            for i in range(0, len(inputs) * 2, 2)
+        ])
 
-        # order is [positive, negative, positive, negative, ...]
-        positive_smaller_mean = np.mean(
-            [
-                projected_hiddens[i] < projected_hiddens[i + 1]
-                for i in range(0, len(inputs) * 2, 2)
-            ]
-        )
-        positive_larger_mean = np.mean(
-            [
-                projected_hiddens[i] > projected_hiddens[i + 1]
-                for i in range(0, len(inputs) * 2, 2)
-            ]
-        )
+        if positive_smaller_mean > positive_larger_mean:
+            direction *= -1
 
-        if positive_smaller_mean > positive_larger_mean:  # type: ignore
-            directions[layer] *= -1
+        results[layer] = direction
 
-    return directions
+    return results
+
 
 
 def batched_get_hiddens(
