@@ -5,7 +5,7 @@ from .utils import Dataset, evaluate, eval_kld, eval_entropy, eval_prob_mass
 
 __all__ = [
     'ControlModel',
-    'ControlVector', "extract", "DatasetEntry", 'ReadingVector', 'ReadingContrastVector', 'PCAContrastVector',
+    'ControlVector', 'ReadingVector', 'ReadingContrastVector', 'PCAContrastVector',
     'Dataset', 'evaluate', 'eval_kld', 'eval_entropy', 'eval_prob_mass'
 ]
 
