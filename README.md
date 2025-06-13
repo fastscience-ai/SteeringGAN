@@ -1,6 +1,6 @@
 # SteeringGAN
 
-SteeringGAN is a framework for training and evaluating activation-steered generative adversarial networks (GANs). This project enables directional control over the output behavior of GANs using concept activation vectors.
+
 
 ---
 
