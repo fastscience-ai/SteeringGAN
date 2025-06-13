@@ -300,13 +300,15 @@ def read_representations(
             pca_model = PCA(n_components=1, whiten=False).fit(train)
             # shape (n_features,)
             directions[layer] = pca_model.components_.astype(np.float32).squeeze(axis=0)
-        else:
+        elif method == "umap":
             # still experimental so don't want to add this as a real dependency yet
             import umap  # type: ignore
 
             umap_model = umap.UMAP(n_components=1)
             embedding = umap_model.fit_transform(train).astype(np.float32)
             directions[layer] = np.sum(train * embedding, axis=0) / np.sum(embedding)
+        else:
+            directions[layer] = np.mean(train, axis = 0)
 
         # calculate sign
         projected_hiddens = project_onto_direction(h, directions[layer])
