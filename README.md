@@ -11,7 +11,7 @@ Follow the steps below to set up your development environment.
 ### 1. Clone the Repository
 
 ```bash
-git clone [https://github.com/fastscience-ai/steering_gan](https://github.com/fastscience-ai/SteeringGAN.git)
+git clone https://github.com/fastscience-ai/SteeringGAN.git
 cd steering_gan
 ```
 
