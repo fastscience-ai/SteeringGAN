@@ -16,7 +16,7 @@ class ControlModel(torch.nn.Module):
     A wrapped language model that can have controls set on its layers with `self.set_control`.
     """
 
-    def __init__(self, model: PreTrainedModel, layer_ids: typing.Iterable[int]):
+    def __init__(self, model: PreTrainedModel, layer_ids: typing.Iterable[int], method):
         """
         **This mutates the wrapped `model`! Be careful using `model` after passing it to this class.**
 
@@ -26,7 +26,7 @@ class ControlModel(torch.nn.Module):
 
         super().__init__()
         self.model = model
-
+        self.method = method
         layers = model_layer_list(model)
         self.layer_ids = [i if i >= 0 else len(layers) + i for i in layer_ids]
         for layer_id in layer_ids:
@@ -77,7 +77,60 @@ class ControlModel(torch.nn.Module):
             raw_control[layer_id] = torch.tensor(
                 coeff * control.directions[layer_id]
             ).to(self.model.device, dtype=self.model.dtype)
-        self.set_raw_control(raw_control, **kwargs)
+        if self.method != "pix2pix":
+            self.set_raw_control(raw_control, **kwargs)
+        else:
+            self.set_raw_control_gan(raw_control, **kwargs)
+    ####TODO SOO
+    def set_control(
+        self,
+        control: "ControlVector | dict[int, typing.Any]",  # Either directions or generators
+        coeff: float = 1.0,
+        **kwargs
+    ) -> None:
+        """
+        Unified control setter: either vector-based (SCAV/PCA) or GAN-based (pix2pix).
+        Requires:
+            - method = "pix2pix" → control = {layer_id: generator}
+            - method ≠ "pix2pix" → control = ControlVector with .directions[layer_id]
+    
+        kwargs:
+            - prompt: str (for pix2pix)
+            - tokenizer: tokenizer object
+            - noise_dim: int (default = 16)
+        """
+        raw_control = {}
+
+        if self.method != "pix2pix":
+            # === Vector-based steering (SCAV/PCA) ===
+            for layer_id in self.layer_ids:
+                raw_control[layer_id] = torch.tensor(
+                    coeff * control.directions[layer_id]
+                ).to(self.model.device, dtype=self.model.dtype)
+
+            self.set_raw_control(raw_control, **kwargs)
+
+        else:
+            # === pix2pix GAN-based control ===
+            assert isinstance(control, dict), "pix2pix expects a dict[layer_id] = generator"
+
+            prompt = kwargs["prompt"]
+            tokenizer = kwargs["tokenizer"]
+            noise_dim = kwargs.get("noise_dim", 16)
+
+            input_ids = tokenizer(prompt, return_tensors="pt").to(self.model.device)
+            with torch.no_grad():
+                outputs = self.model.model(**input_ids, output_hidden_states=True)
+
+                for layer_id in self.layer_ids:
+                    generator = control[layer_id]
+                    hidden = outputs.hidden_states[layer_id]  # (1, seq_len, dim)
+                    rep = hidden[:, -1]  # use last token's embedding
+                    z = torch.randn(1, noise_dim).to(self.model.device)
+                    vec = generator(rep, z).squeeze(0) * coeff
+                    raw_control[layer_id] = vec.to(self.model.device, dtype=self.model.dtype)
+
+            self.set_raw_control_gan(raw_control, **kwargs)
 
     def reset(self) -> None:
         """
@@ -111,6 +164,33 @@ class ControlModel(torch.nn.Module):
             else:
                 layer.set_control(BlockControlParams(control[layer_id], **kwargs))
 
+    def set_raw_control_gan(
+        self, control: dict[int, torch.Tensor] | None, **kwargs
+    ) -> None:
+        """
+        Set or remove control parameters to the layers this ControlModel handles.
+        The keys of `control` should be equal to or a superset of the `layer_ids` passed to __init__.
+        Only those layers will be controlled, any others in `control` will be ignored.
+
+        Passing `control=None` will reset the control tensor for all layer_ids, making the model act
+        like a non-control model.
+
+        Additional kwargs:
+        - `normalize: bool`: track the magnitude of the non-modified activation, and rescale the
+          activation to that magnitude after control (default: `False`)
+        - `operator: Callable[[Tensor, Tensor], Tensor]`: how to combine the base output and control
+          (default: +)
+        """
+
+        layers = model_layer_list(self.model)
+        for layer_id in self.layer_ids:
+            layer: ControlModule = layers[layer_id]  # type: ignore
+            if control is None:
+                layer.reset()
+            else:
+                layer.set_control(BlockControlParams_GAN(control[layer_id], **kwargs))
+
+
     def forward(self, *args, **kwargs):
         return self.model.forward(*args, **kwargs)
 
@@ -133,6 +213,19 @@ class BlockControlParams:
     def default(cls) -> "BlockControlParams":
         return cls()
 
+#SOO
+@dataclasses.dataclass
+class BlockControlParams_GAN:
+    control: torch.Tensor | None = None
+    normalize: bool = False
+    operator: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = (
+        lambda current, control: control
+    )
+
+    @classmethod
+    def default(cls) -> "BlockControlParams_GAN":
+        return cls()
+
 
 class ControlModule(torch.nn.Module):
     def __init__(self, block: torch.nn.Module) -> None:
@@ -141,6 +234,9 @@ class ControlModule(torch.nn.Module):
         self.params: BlockControlParams = BlockControlParams.default()
 
     def set_control(self, params: BlockControlParams) -> None:
+        self.params = params
+
+    def set_control_gan(self, params: BlockControlParams_GAN) -> None:
         self.params = params
 
     def reset(self) -> None:

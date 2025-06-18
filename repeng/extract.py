@@ -2,14 +2,16 @@ import dataclasses
 import os
 import typing
 import warnings
-
+from sklearn.linear_model import LogisticRegression
 import gguf
 import numpy as np
 from sklearn.decomposition import PCA
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 import tqdm
-
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
 from .control import ControlModel, model_layer_list
 from .saes import Sae
 
@@ -67,7 +69,7 @@ class ControlVector:
         dataset: list[DatasetEntry],
         *,
         decode: bool = True,
-        method: typing.Literal["scav", "umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"] = "pca_center",
+        method: typing.Literal["pix2pix", "scav", "umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"] = "pca_center",
         **kwargs,
     ) -> "ControlVector":
         """
@@ -239,98 +241,82 @@ class ControlVector:
     def __truediv__(self, other: int | float | np.number) -> "ControlVector":
         return self.__mul__(1 / other)
 
-#"""
-#def read_representations(
-#    model: "PreTrainedModel | ControlModel",
-#    tokenizer: PreTrainedTokenizerBase,
-#    inputs: list[DatasetEntry],
-#    hidden_layers: typing.Iterable[int] | None = None,
-#    batch_size: int = 32,
-#    method: typing.Literal["umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"] = "pca_contrastvector",
-#    transform_hiddens: (
-#        typing.Callable[[dict[int, np.ndarray]], dict[int, np.ndarray]] | None
-#    ) = None,
-#) -> dict[int, np.ndarray]:
-#    if not hidden_layers:
-#        hidden_layers = range(-1, -model.config.num_hidden_layers, -1)
-#
-#    # normalize the layer indexes if they're negative
-#    n_layers = len(model_layer_list(model))
-#    hidden_layers = [i if i >= 0 else n_layers + i for i in hidden_layers]
-#
-#    # the order is [positive, negative, positive, negative, ...]
-#    train_strs = [s for ex in inputs for s in (ex.positive, ex.negative)]
-#
-#    layer_hiddens = batched_get_hiddens(
-#        model, tokenizer, train_strs, hidden_layers, batch_size
-#    )
-#
-#    if transform_hiddens is not None:
-#        layer_hiddens = transform_hiddens(layer_hiddens)
 
-#    # get directions for each layer using PCA
-#    directions: dict[int, np.ndarray] = {}
-#    for layer in tqdm.tqdm(hidden_layers):
-#        h = layer_hiddens[layer]
-#        assert h.shape[0] == len(inputs) * 2
-#        # ["umap", "readingvector", "reading_contrastvector", "pca_contrastvector","pca_readingvector", "pca_center"]
-#        if method == "pca_contrastvector":
-#            train = h[::2] - h[1::2] # PCAContrastVector
-#        elif method == "pca_readingvector":
-#            train = h[::2] #only positive representation
-#        elif method == "reading_contrastvector":
-#            train = h[::2] - h[1::2]
-#        elif method == "readingvector":
-#            train = h[::2]
-#        elif method == "pca_center":
-#            center = (h[::2] + h[1::2]) / 2
-#            train = h
-#            train[::2] -= center
-#            train[1::2] -= center
-#        elif method == "umap":
-#            train = h
-#        else:
-#            raise ValueError("unknown method " + method)
-#
-#        if method not in ["umap", "readingvector", "reading_contrastvector"]:
-#            # shape (1, n_features)
-#            pca_model = PCA(n_components=1, whiten=False).fit(train)
-#            # shape (n_features,)
-#            directions[layer] = pca_model.components_.astype(np.float32).squeeze(axis=0)
-#        elif method == "umap":
-#            # still experimental so don't want to add this as a real dependency yet
-#            import umap  # type: ignore
-#
-#            umap_model = umap.UMAP(n_components=1)
-#            embedding = umap_model.fit_transform(train).astype(np.float32)
-#            directions[layer] = np.sum(train * embedding, axis=0) / np.sum(embedding)
-#        else:
-#            directions[layer] = np.mean(train, axis = 0)
-#
-#        # calculate sign
-#        projected_hiddens = project_onto_direction(h, directions[layer])
-#
-#        # order is [positive, negative, positive, negative, ...]
-#        positive_smaller_mean = np.mean(
-#            [
-#                projected_hiddens[i] < projected_hiddens[i + 1]
-#                for i in range(0, len(inputs) * 2, 2)
-#            ]
-#        )
-#        positive_larger_mean = np.mean(
-#            [
-#                projected_hiddens[i] > projected_hiddens[i + 1]
-#                for i in range(0, len(inputs) * 2, 2)
-#            ]
-#        )
-#
-#        if positive_smaller_mean > positive_larger_mean:  # type: ignore
-#            directions[layer] *= -1
-#
-#    return directions
-    
 
-from sklearn.linear_model import LogisticRegression
+class MLPGenerator(nn.Module):
+    def __init__(self, input_dim: int, noise_dim: int = 16, hidden_dim: int = 512):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_dim + noise_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim)
+        )
+
+    def forward(self, x, z):
+        return self.model(torch.cat([x, z], dim=1))
+
+
+class MLPDiscriminator(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int = 256):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x, y):
+        return self.model(torch.cat([x, y], dim=1))
+
+
+def train_embedding_pix2pix(pos_embds: np.ndarray, neg_embds: np.ndarray, layer: int, num_epochs: int = 100, batch_size: int = 64) -> nn.Module:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    dim = pos_embds.shape[1]
+    noise_dim = 16
+
+    G = MLPGenerator(input_dim=dim, noise_dim=noise_dim).to(device)
+    D = MLPDiscriminator(input_dim=dim).to(device)
+
+    pos_tensor = torch.tensor(pos_embds, dtype=torch.float32)
+    neg_tensor = torch.tensor(neg_embds, dtype=torch.float32)
+
+    dataset = TensorDataset(pos_tensor, neg_tensor)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    g_opt = optim.Adam(G.parameters(), lr=1e-4)
+    d_opt = optim.Adam(D.parameters(), lr=1e-4)
+    loss_fn = nn.BCELoss()
+
+    for epoch in range(num_epochs):
+        for x_real, y_real in loader:
+            x_real, y_real = x_real.to(device), y_real.to(device)
+            batch_size = x_real.size(0)
+            z = torch.randn(batch_size, noise_dim, device=device)
+
+            # === Train Discriminator ===
+            y_fake = G(x_real, z).detach()
+            d_real = D(x_real, y_real)
+            d_fake = D(x_real, y_fake)
+            d_loss = loss_fn(d_real, torch.ones_like(d_real)) + loss_fn(d_fake, torch.zeros_like(d_fake))
+            D.zero_grad()
+            d_loss.backward()
+            d_opt.step()
+
+            # === Train Generator ===
+            z = torch.randn(batch_size, noise_dim, device=device)
+            y_fake = G(x_real, z)
+            d_fake = D(x_real, y_fake)
+            g_loss = loss_fn(d_fake, torch.ones_like(d_fake))
+            G.zero_grad()
+            g_loss.backward()
+            g_opt.step()
+
+    return G.eval().cpu()
+
+
+
 
 def read_representations(
     model: "PreTrainedModel | ControlModel",
@@ -340,7 +326,7 @@ def read_representations(
     batch_size: int = 32,
     method: typing.Literal[
         "umap", "readingvector", "reading_contrastvector",
-        "pca_contrastvector", "pca_readingvector", "pca_center", "scav"
+        "pca_contrastvector", "pca_readingvector", "pca_center", "scav", "pix2pix",
     ] = "pca_contrastvector",
     transform_hiddens: (
         typing.Callable[[dict[int, np.ndarray]], dict[int, np.ndarray]] | None
@@ -377,6 +363,15 @@ def read_representations(
             clf.fit(x, y)
             results[layer] = clf
             continue  # skip rest of the loop
+
+        elif method == "pix2pix":
+            pos_train_embds, neg_train_embds = h[::2], h[1::2]
+    
+            # Train GAN to learn mapping: pos → neg
+            generator = train_embedding_pix2pix(pos_train_embds, neg_train_embds, layer=layer)
+    
+            results[layer] = generator
+            continue  # skip rest
 
         # other methods → compute direction vectors
         if method == "pca_contrastvector":
