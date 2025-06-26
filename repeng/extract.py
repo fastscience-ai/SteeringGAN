@@ -7,6 +7,7 @@ import gguf
 import numpy as np
 from sklearn.decomposition import PCA
 import torch
+import os 
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 import tqdm
 import torch.nn as nn
@@ -14,6 +15,7 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from .control import ControlModel, model_layer_list
 from .saes import Sae
+from .train_embedding_pix2pix import *
 
 
 @dataclasses.dataclass
@@ -51,14 +53,70 @@ class ControlVector:
         Returns:
             ControlVector: The trained vector.
         """
-        with torch.inference_mode():
-            dirs = read_representations(
-                model,
-                tokenizer,
-                dataset,
-                **kwargs,
+        method = kwargs.get("method", "pca_diff")
+        if method not in ["scav", "pix2pix"]:
+            with torch.inference_mode():
+                dirs = read_representations(
+                     model,
+                     tokenizer,
+                     dataset,
+                     **kwargs,
+                 )
+            return cls(model_type=model.config.model_type, directions=dirs)
+        elif method =="scav" :
+            print("train funciton is not competible with the SCAV method")
+        elif method == "pix2pix":
+            print("train function is not competible with the Pix2pix method")
+
+
+    @classmethod
+    def train_wt_pix2pix(
+        cls,
+        model: "PreTrainedModel | ControlModel",
+        tokenizer: PreTrainedTokenizerBase,
+        dataset: list[DatasetEntry],
+        **kwargs,
+    ):
+        """
+        Train a ControlVector for a given model and tokenizer using the provided dataset.
+
+        Args:
+            model (PreTrainedModel | ControlModel): The model to train against.
+            tokenizer (PreTrainedTokenizerBase): The tokenizer to tokenize the dataset.
+            dataset (list[DatasetEntry]): The dataset used for training.
+            **kwargs: Additional keyword arguments.
+                max_batch_size (int, optional): The maximum batch size for training.
+                    Defaults to 32. Try reducing this if you're running out of memory.
+                method (str, optional): The training method to use. Can be either
+                    "pix2pix".
+
+        Returns:
+            ControlVector: The trained generator models.
+        """
+        method = kwargs.get("method", "pca_diff")
+        if method == "pix2pix":
+            results = read_representations(
+                     model,
+                     tokenizer,
+                     dataset,
+                     **kwargs,
             )
-        return cls(model_type=model.config.model_type, directions=dirs)
+            
+            # Create directory if it doesn't exist
+            save_dir = "pix2pix_generators"
+            os.makedirs(save_dir, exist_ok=True)
+            sorted_layers = sorted(results.keys(), reverse=True)
+            for i, layer in enumerate(sorted_layers):
+                generator = results[layer]
+                filename = f"g_{len(results) - 1 - i}.pt"
+                torch.save(generator.state_dict(), os.path.join(save_dir, filename))
+            return results
+        else:
+            print("train function is not competible with the method")
+
+
+
+
 
     @classmethod
     def train_with_sae(
@@ -243,77 +301,6 @@ class ControlVector:
 
 
 
-class MLPGenerator(nn.Module):
-    def __init__(self, input_dim: int, noise_dim: int = 16, hidden_dim: int = 512):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(input_dim + noise_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, input_dim)
-        )
-
-    def forward(self, x, z):
-        return self.model(torch.cat([x, z], dim=1))
-
-
-class MLPDiscriminator(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int = 256):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(input_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x, y):
-        return self.model(torch.cat([x, y], dim=1))
-
-
-def train_embedding_pix2pix(pos_embds: np.ndarray, neg_embds: np.ndarray, layer: int, num_epochs: int = 100, batch_size: int = 64) -> nn.Module:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    dim = pos_embds.shape[1]
-    noise_dim = 16
-
-    G = MLPGenerator(input_dim=dim, noise_dim=noise_dim).to(device)
-    D = MLPDiscriminator(input_dim=dim).to(device)
-
-    pos_tensor = torch.tensor(pos_embds, dtype=torch.float32)
-    neg_tensor = torch.tensor(neg_embds, dtype=torch.float32)
-
-    dataset = TensorDataset(pos_tensor, neg_tensor)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-    g_opt = optim.Adam(G.parameters(), lr=1e-4)
-    d_opt = optim.Adam(D.parameters(), lr=1e-4)
-    loss_fn = nn.BCELoss()
-
-    for epoch in range(num_epochs):
-        for x_real, y_real in loader:
-            x_real, y_real = x_real.to(device), y_real.to(device)
-            batch_size = x_real.size(0)
-            z = torch.randn(batch_size, noise_dim, device=device)
-
-            # === Train Discriminator ===
-            y_fake = G(x_real, z).detach()
-            d_real = D(x_real, y_real)
-            d_fake = D(x_real, y_fake)
-            d_loss = loss_fn(d_real, torch.ones_like(d_real)) + loss_fn(d_fake, torch.zeros_like(d_fake))
-            D.zero_grad()
-            d_loss.backward()
-            d_opt.step()
-
-            # === Train Generator ===
-            z = torch.randn(batch_size, noise_dim, device=device)
-            y_fake = G(x_real, z)
-            d_fake = D(x_real, y_fake)
-            g_loss = loss_fn(d_fake, torch.ones_like(d_fake))
-            G.zero_grad()
-            g_loss.backward()
-            g_opt.step()
-
-    return G.eval().cpu()
 
 
 
@@ -366,7 +353,7 @@ def read_representations(
 
         elif method == "pix2pix":
             pos_train_embds, neg_train_embds = h[::2], h[1::2]
-    
+            print(len(h[::2]), len(h[1::2]))
             # Train GAN to learn mapping: pos → neg
             generator = train_embedding_pix2pix(pos_train_embds, neg_train_embds, layer=layer)
     
@@ -447,6 +434,11 @@ def batched_get_hiddens(
             encoded_batch = tokenizer(batch, padding=True, return_tensors="pt")
             encoded_batch = encoded_batch.to(model.device)
             out = model(**encoded_batch, output_hidden_states=True)
+            ##
+            #pred_ids = torch.argmax(out.logits, dim=-1)
+            #decoded = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+            #print(decoded)
+            #exit()
             attention_mask = encoded_batch["attention_mask"]
             for i in range(len(batch)):
                 last_non_padding_index = (

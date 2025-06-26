@@ -57,30 +57,30 @@ class ControlModel(torch.nn.Module):
             layers[layer_id] = layers[layer_id].block
         return self.model
 
-    def set_control(
-        self, control: "ControlVector", coeff: float = 1.0, **kwargs
-    ) -> None:
-        """
-        Set a `ControlVector` for the layers this ControlModel handles, with a strength given
-        by `coeff`. (Negative `coeff` values invert the control vector, e.g. happiness→sadness.)
-        `coeff` defaults to `1.0`.
-
-        Additional kwargs:
-        - `normalize: bool`: track the magnitude of the non-modified activation, and rescale the
-          activation to that magnitude after control (default: `False`)
-        - `operator: Callable[[Tensor, Tensor], Tensor]`: how to combine the base output and control
-          (default: +)
-        """
-
-        raw_control = {}
-        for layer_id in self.layer_ids:
-            raw_control[layer_id] = torch.tensor(
-                coeff * control.directions[layer_id]
-            ).to(self.model.device, dtype=self.model.dtype)
-        if self.method != "pix2pix":
-            self.set_raw_control(raw_control, **kwargs)
-        else:
-            self.set_raw_control_gan(raw_control, **kwargs)
+#    def set_control(
+#        self, control: "ControlVector", coeff: float = 1.0, **kwargs
+#    ) -> None:
+#        """
+#        Set a `ControlVector` for the layers this ControlModel handles, with a strength given
+#        by `coeff`. (Negative `coeff` values invert the control vector, e.g. happiness→sadness.)
+#        `coeff` defaults to `1.0`.
+#
+#        Additional kwargs:
+#        - `normalize: bool`: track the magnitude of the non-modified activation, and rescale the
+#          activation to that magnitude after control (default: `False`)
+#        - `operator: Callable[[Tensor, Tensor], Tensor]`: how to combine the base output and control
+#          (default: +)
+#        """
+#
+#        raw_control = {}
+#        for layer_id in self.layer_ids:
+#            raw_control[layer_id] = torch.tensor(
+#                coeff * control.directions[layer_id]
+#            ).to(self.model.device, dtype=self.model.dtype)
+#        if self.method != "pix2pix":
+#            self.set_raw_control(raw_control, **kwargs)
+#        else:
+#            self.set_raw_control_gan(raw_control, **kwargs)
     ####TODO SOO
     def set_control(
         self,
@@ -102,7 +102,7 @@ class ControlModel(torch.nn.Module):
         raw_control = {}
 
         if self.method != "pix2pix":
-            # === Vector-based steering (SCAV/PCA) ===
+        # === Vector-based steering (SCAV/PCA) ===
             for layer_id in self.layer_ids:
                 raw_control[layer_id] = torch.tensor(
                     coeff * control.directions[layer_id]
@@ -111,26 +111,33 @@ class ControlModel(torch.nn.Module):
             self.set_raw_control(raw_control, **kwargs)
 
         else:
+            for layer_id in self.layer_ids:
+                raw_control[layer_id] = torch.tensor(
+                    control.directions[layer_id]
+                ).to(self.model.device, dtype=self.model.dtype)
+
+            self.set_raw_control_pix2pix(raw_control, **kwargs)
+
             # === pix2pix GAN-based control ===
-            assert isinstance(control, dict), "pix2pix expects a dict[layer_id] = generator"
+        #    assert isinstance(control, dict), "pix2pix expects a dict[layer_id] = generator"
 
-            prompt = kwargs["prompt"]
-            tokenizer = kwargs["tokenizer"]
-            noise_dim = kwargs.get("noise_dim", 16)
+        #    prompt = kwargs["prompt"]
+        #    tokenizer = kwargs["tokenizer"]
+        #    noise_dim = kwargs.get("noise_dim", 16)
 
-            input_ids = tokenizer(prompt, return_tensors="pt").to(self.model.device)
-            with torch.no_grad():
-                outputs = self.model.model(**input_ids, output_hidden_states=True)
+        #    input_ids = tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        #    with torch.no_grad():
+        #        outputs = self.model.model(**input_ids, output_hidden_states=True)
 
-                for layer_id in self.layer_ids:
-                    generator = control[layer_id]
-                    hidden = outputs.hidden_states[layer_id]  # (1, seq_len, dim)
-                    rep = hidden[:, -1]  # use last token's embedding
-                    z = torch.randn(1, noise_dim).to(self.model.device)
-                    vec = generator(rep, z).squeeze(0) * coeff
-                    raw_control[layer_id] = vec.to(self.model.device, dtype=self.model.dtype)
+        #       for layer_id in self.layer_ids:
+        #            generator = control[layer_id]
+        #            hidden = outputs.hidden_states[layer_id]  # (1, seq_len, dim)
+        #            rep = hidden[:, -1]  # use last token's embedding
+        #            z = torch.randn(1, noise_dim).to(self.model.device)
+        #            vec = generator(rep, z).squeeze(0) * coeff
+        #            raw_control[layer_id] = vec.to(self.model.device, dtype=self.model.dtype)
 
-            self.set_raw_control_gan(raw_control, **kwargs)
+         #   self.set_raw_control_gan(raw_control, **kwargs)
 
     def reset(self) -> None:
         """
@@ -164,7 +171,7 @@ class ControlModel(torch.nn.Module):
             else:
                 layer.set_control(BlockControlParams(control[layer_id], **kwargs))
 
-    def set_raw_control_gan(
+    def set_raw_control_pix2pix(
         self, control: dict[int, torch.Tensor] | None, **kwargs
     ) -> None:
         """
@@ -231,6 +238,7 @@ class ControlModule(torch.nn.Module):
     def __init__(self, block: torch.nn.Module) -> None:
         super().__init__()
         self.block: torch.nn.Module = block
+        
         self.params: BlockControlParams = BlockControlParams.default()
 
     def set_control(self, params: BlockControlParams) -> None:
@@ -251,12 +259,16 @@ class ControlModule(torch.nn.Module):
             return output
         elif len(control.shape) == 1:
             control = control.reshape(1, 1, -1)
+        elif len(control.shape)==2:
+            control = control.reshape(1,1,-1)
 
         if isinstance(output, tuple):
             modified = output[0]
         else:
             modified = output
-
+        #print(control.shape, modified.shape, len(control.shape), len(modified.shape)) 
+        #torch.Size([1, 1, 4096]) torch.Size([1, 1, 4096]) 3 3
+        #torch.Size([1, 4096]) torch.Size([1, 14, 4096])
         assert len(control.shape) == len(modified.shape)
         control = control.to(modified.device)
 

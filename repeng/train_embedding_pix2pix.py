@@ -3,12 +3,17 @@ import torch.nn as nn
 import  numpy as np
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
+import wandb
 
 class MLPGenerator(nn.Module):
     def __init__(self, input_dim: int, noise_dim: int = 16, hidden_dim: int = 512):
         super().__init__()
         self.model = nn.Sequential(
             nn.Linear(input_dim + noise_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, input_dim)
         )
@@ -23,6 +28,10 @@ class MLPDiscriminator(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(input_dim * 2, hidden_dim),
             nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
             nn.Linear(hidden_dim, 1),
             nn.Sigmoid()
         )
@@ -31,7 +40,19 @@ class MLPDiscriminator(nn.Module):
         return self.model(torch.cat([x, y], dim=1))
 
 
-def train_embedding_pix2pix(pos_embds: np.ndarray, neg_embds: np.ndarray, layer: int, num_epochs: int = 100, batch_size: int = 64) -> nn.Module:
+
+def train_embedding_pix2pix(pos_embds: np.ndarray, neg_embds: np.ndarray, layer: int, num_epochs: int = 1000, batch_size: int = 64) -> nn.Module:
+    wandb.init(
+        project="pix2pix-embedding",
+        name=f"layer_{layer}",
+        config={
+            "num_epochs": num_epochs,
+            "batch_size": batch_size,
+            "layer": layer,
+            "noise_dim": 16,
+        },
+    )
+    print("Start trainig for the layer "+str(layer))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dim = pos_embds.shape[1]
@@ -40,8 +61,8 @@ def train_embedding_pix2pix(pos_embds: np.ndarray, neg_embds: np.ndarray, layer:
     G = MLPGenerator(input_dim=dim, noise_dim=noise_dim).to(device)
     D = MLPDiscriminator(input_dim=dim).to(device)
 
-    pos_tensor = torch.tensor(pos_embds, dtype=torch.float32)
-    neg_tensor = torch.tensor(neg_embds, dtype=torch.float32)
+    pos_tensor = torch.tensor(pos_embds, dtype=torch.float32).to(device)
+    neg_tensor = torch.tensor(neg_embds, dtype=torch.float32).to(device)
 
     dataset = TensorDataset(pos_tensor, neg_tensor)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -74,5 +95,14 @@ def train_embedding_pix2pix(pos_embds: np.ndarray, neg_embds: np.ndarray, layer:
             g_loss.backward()
             g_opt.step()
 
+            # === WanDB ===
+            # Log losses
+            wandb.log({
+                "epoch": epoch,
+                "d_loss": d_loss.item(),
+                "g_loss": g_loss.item()
+            })
+    print("Finished training for the layer of "+str(layer))
+    wandb.finish()
     return G.eval().cpu()
 
